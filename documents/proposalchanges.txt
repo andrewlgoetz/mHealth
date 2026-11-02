@@ -18,3 +18,14 @@ Which activities are most affected by domain shift, and which sources of shift (
 (Updated) RQ2:  
 
 Which shared activities experience the largest performance drops when transferring (domains) between UCI HAR and WISDM? 
+
+
+
+
+Implementation:
+Changes from the proposal/previous implementation:
+- 2.5-second windows instead of 5 seconds (UCI dataset).
+- 20 features instead of 76 (for now, testing): mean, standard deviation, RMS, range, and dominant frequency for x/y/z/magnitude.
+- UCI retains its 1.28-second stride; WISDM uses 1.25 seconds—approximately matching overlap.
+- (for now) Removed download automation, scaling helpers, detailed reports, and duplicate exports. Each dataset saves to one NPZ file.
+

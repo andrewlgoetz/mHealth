@@ -1,130 +1,131 @@
-# Cross-dataset human activity recognition
+# Cross-dataset activity recognition
 
-Data preparation for the group proposal: compare UCI HAR and WISDM in both transfer directions, then study adaptation with a small labelled target sample. The code uses ordinary Python files so everyone can work on separate parts of the project.
+A basic workflow for comparing UCI HAR and WISDM. Both datasets get the same
+20 features, five activity labels, acceleration units, and 2.5-second windows.
 
-## Run the preparation
+## Run it
 
-Use Python 3.11 or newer. From the repository root, in PowerShell:
+Use Python 3.11 or newer. From this folder, in PowerShell:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe download_data.py
 .\.venv\Scripts\python.exe data_process.py
-.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe check_data.py
+.\.venv\Scripts\python.exe sample_data.py
 ```
 
-The datasets have already been downloaded and prepared locally. Downloads and generated arrays live in `data/`, which is ignored by Git. Each teammate can reproduce them with these commands. Downloading again reuses the archives and checks their SHA-256 hashes against `reports/data_sources.json`. The original READMEs and other release documentation are retained under `data/raw/`.
+The raw data are already downloaded on this machine. Preparation creates:
 
-To change the window length, overlap, subject split seed, or maximum WISDM interpolation gap:
+- `data/processed/uci_har.npz`
+- `data/processed/wisdm.npz`
 
-```powershell
-.\.venv\Scripts\python.exe data_process.py --window-seconds 5 --overlap 0.5 --seed 42 --max-gap-seconds 0.5
-```
+`check_data.py` runs the unit tests and checks both actual saved datasets. It
+checks shapes, labels, finite values, subject separation, matching feature names,
+and whether saved features match their windows. A failure exits with an error.
+`sample_data.py` prints one training example per activity with every feature
+visible. Use `sample_data.py --rows 2` for a smaller sample.
 
-This replaces the generated datasets and summary reports. Sampling rate stays at 20 Hz. Window and step lengths are rounded to whole samples; the reports record the actual durations.
-
-## Files
+## What each file does
 
 | File | Purpose |
 | --- | --- |
-| `download_data.py` | Download and extract the official releases; record hashes and source URLs. |
-| `data_process.py` | Read signals, clean recordings, harmonize units and sampling, make windows and subject splits. |
-| `features.py` | Extract the same 76 features from either dataset. |
-| `model_data.py` | Load arrays and prepare transfer experiments using source training statistics. |
-| `test_features.py`, `test_data_process.py` | Check known signals, recording boundaries, subject splits, and scaling. |
-| `reports/` | Download provenance, cleaning counts, class counts, and the exact subject assignments. |
+| `data_process.py` | Read and clean data, make windows, split subjects, save arrays. |
+| `features.py` | Calculate the same 20 features for either dataset. |
+| `check_data.py` | Run tests and check the prepared data. |
+| `sample_data.py` | Print training examples with all features and their labels. |
+| `test_data_process.py`, `test_features.py` | Small tests with known input signals. |
 
-## Datasets and preprocessing
+## Data sources
 
-The sources are [UCI HAR, dataset 240](https://archive.ics.uci.edu/dataset/240/human+activity+recognition+using+smartphones) and [Fordham WISDM Activity Prediction v1.1](https://www.cis.fordham.edu/wisdm/dataset.php). WISDM here is the original six-activity smartphone release described in the proposal. The downloader records the archive checksum because the WISDM download URL uses the name `latest`.
+On another machine, download [UCI HAR](https://archive.ics.uci.edu/dataset/240/human+activity+recognition+using+smartphones)
+and [WISDM Activity Prediction v1.1](https://www.cis.fordham.edu/wisdm/dataset.php).
+Extract the archives so these paths exist (the UCI download may contain another ZIP):
 
-Both datasets use only total x/y/z acceleration, including gravity. Gyroscope readings and the publishers' precomputed features are excluded. UCI acceleration is converted from g to m/s² using 9.80665; WISDM is already in m/s². Axis order is x, y, z. Device orientation and placement differences remain for the experiments to measure.
-
-The shared label mapping is fixed:
-
-| Label | Activity |
-| --- | --- |
-| 0 | walking |
-| 1 | upstairs |
-| 2 | downstairs |
-| 3 | sitting |
-| 4 | standing |
-
-UCI laying and WISDM jogging are excluded. Every window has one subject, one activity, and one continuous recording segment. Incomplete final windows are discarded; there is no padding, class balancing, or per-window normalization.
-
-**UCI HAR:** The original release contains filtered, overlapping 128-sample windows at 50 Hz, rather than continuous raw recordings. Adjacent rows are joined only when their subject and label agree and the previous final 64 samples exactly match the next first 64 samples on all axes. Only the new 64 samples are appended. This check detects 457 same-subject, same-label discontinuities that would otherwise create artificial recordings. Each verified run is downsampled to 20 Hz with an anti-aliasing polyphase FIR filter before making the shared windows. Time starts at zero within each reconstructed segment; original wall-clock times are unavailable. Longer windows are reconstructed from this release, rather than substituted from a different UCI dataset.
-
-**WISDM:** Semicolon-delimited records are read in their original order, including multiple records on a line. One extra trailing comma is repaired when all six fields are present. Consecutive records with identical subject, activity, timestamp, and acceleration are removed. Malformed readings, nonpositive timestamps, backwards clocks, conflicting readings at the same timestamp, activity or subject changes, and gaps over 0.5 seconds end a segment. No sorting joins separate sessions. Each remaining segment is interpolated onto a uniform 20 Hz timestamp grid without extrapolation. This uses elapsed time rather than assuming that every 100 source rows span five seconds. The default maximum interpolation gap is configurable and is a preprocessing assumption to revisit in sensitivity analyses.
-
-## Prepared data
-
-Default configuration: 5-second windows (100 samples), 2.5-second step (50% overlap), seed 42.
-
-| Dataset | Subjects | Train windows | Validation windows | Test windows | Total |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| UCI HAR | 30 | 2,018 | 557 | 1,034 | 3,609 |
-| WISDM | 36 | 8,368 | 3,088 | 2,595 | 14,051 |
-
-UCI keeps its official nine test subjects. Four of its 21 training subjects are reserved for validation, leaving 17 for training. WISDM uses 22 training, seven validation, and seven test subjects. Subjects are disjoint within each dataset, so overlapping windows cannot cross splits. Subject identifiers are local to each dataset: UCI subject 1 and WISDM subject 1 are different people. All five classes occur in each split. Use the subject identifiers as groups for later subject-level cross-validation; changing `--seed` changes the validation selection and WISDM split, while preserving UCI's official test subjects.
-
-The final WISDM cleaning removed 41,867 exact repeated records and 12,846 invalid records (12,845 nonpositive timestamps and one missing acceleration value), and repaired 11,733 trailing commas. Its retained windows remain imbalanced: walking 8,095; upstairs 2,173; downstairs 1,754; sitting 1,111; standing 918. Keep macro F1 and per-class metrics in the model evaluation. Full counts are in the JSON reports.
-
-Each `data/processed/{uci_har,wisdm}/` folder contains:
-
-| File | Contents |
-| --- | --- |
-| `dataset.npz` | `X` (windows × 100 × 3), `features` (windows × 76), `y`, `subjects`, `split`, `segment_ids`, `start_seconds`, `feature_names`. Model inputs are float32; labels are integers. |
-| `features.csv` | The same unscaled feature matrix with named columns, in NPZ row order. |
-| `metadata.csv` | Subject, label, activity, segment, start time within the segment, original partition, and assigned split, in the same row order. |
-| `segments.csv` | Segment provenance, source starting record, resampled sample count, and number of output windows; includes segments too short for a window. WISDM also records the original starting timestamp in nanoseconds. |
-
-Arrays are saved without Python objects and load with `allow_pickle=False`. Subject IDs, segment IDs, timestamps, and split names are metadata; do not include them as model features.
-
-## Features
-
-Features are computed for x, y, z, and acceleration magnitude. Each channel has mean, population standard deviation, min, max, median, interquartile range, RMS, mean absolute deviation about the mean, mean-square energy, demeaned zero-crossing rate, range, skewness, and excess kurtosis. Frequency features use a demeaned signal and a Hann-windowed FFT, with DC excluded: dominant frequency, spectral centroid, normalized spectral entropy, and power fractions in [0.1, 3) Hz and [3, 10) Hz. Power fractions use all non-DC power as their denominator, including the Nyquist bin. The remaining four features are the three axis correlations and signal magnitude area, defined as mean(|x| + |y| + |z|). Constant-signal spectral, standardized-moment, and correlation features return zero.
-
-## Start model development
-
-Load unscaled inputs for tree models, or fit your own preprocessing using training subjects:
-
-```python
-from model_data import load_dataset
-
-train = load_dataset("uci_har", split="train")
-val = load_dataset("uci_har", split="val")
-test = load_dataset("uci_har", split="test")
-
-X_train, y_train = train["features"], train["y"]  # classical models
-windows_train = train["X"]                     # CNN/LSTM: (N, 100, 3)
-groups = train["subjects"]                     # subject-level CV
+```text
+data/raw/uci_har/UCI HAR Dataset/train/
+data/raw/uci_har/UCI HAR Dataset/test/
+data/raw/wisdm/WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt
 ```
 
-For a transfer experiment with optional standardization already applied:
+Use the original six-activity WISDM smartphone release. Keep the publishers'
+READMEs with the data. The `data/` folder is ignored by Git; teammates prepare
+their own local copies.
+
+## Preprocessing choices
+
+- Use total acceleration, including gravity, in x/y/z order. Convert UCI from g
+  to m/s^2 using 9.80665. WISDM already uses m/s^2. Gyroscopes are excluded.
+- Keep five shared activities: `0=walking`, `1=upstairs`, `2=downstairs`,
+  `3=sitting`, `4=standing`. Exclude UCI laying and WISDM jogging.
+- For UCI, use the first 125 samples of each released window (2.5 seconds at
+  50 Hz). Downsample with an anti-aliasing filter to 50 samples at 20 Hz.
+  Each released window is handled independently; no recording reconstruction.
+- For WISDM, repair an extra trailing comma and remove exact repeated readings.
+  Invalid readings, clock resets, conflicting timestamps, subject/activity
+  changes, and gaps over 0.5 seconds end a recording. Preserve file order.
+  Interpolate within each recording to 20 Hz, then take 50-sample windows with
+  a 25-sample step. Discard incomplete windows; do not extrapolate or pad.
+- Split by subject with seed 42. UCI keeps its official nine test subjects,
+  with four validation and 17 training subjects. WISDM has seven test, seven
+  validation, and 22 training subjects. Subject IDs belong to their own dataset.
+- Save unscaled inputs. Do not fit normalization on test or target data when
+  measuring unadapted transfer. Fit any scaler on source training data only,
+  then apply it to both datasets. Keep per-window normalization out of this
+  baseline because it removes potentially useful gravity/orientation signals.
+
+The same window duration and features support both transfer directions.
+WISDM remains imbalanced, so evaluate macro F1 and per-class results alongside
+accuracy. This preparation checks data quality; it does not establish model accuracy.
+
+## Changes from the proposal and previous implementation
+
+1. **2.5-second windows instead of the suggested 5 seconds.** This fits inside
+   UCI's released windows and removes all stitching logic. Frequency resolution
+   is now 0.4 Hz. Both datasets use 50 readings per window at 20 Hz.
+2. **Approximately matching overlap.** UCI retains its released 1.28-second
+   stride, giving 48.8% overlap after cropping; WISDM uses a 1.25-second stride
+   and 50% overlap. The slight stride difference avoids reconstructing UCI.
+3. **20 simple features instead of 76.** For x, y, z, and magnitude, calculate
+   mean, population standard deviation, RMS, range, and dominant frequency.
+   Frequency is calculated after demeaning and Hann tapering, excluding DC;
+   constant signals return zero frequency. Magnitude is sqrt(x^2 + y^2 + z^2).
+4. **Less machinery.** Download/extraction automation, checksum tracking,
+   configurable window settings, transfer/scaling helpers, detailed reports,
+   and duplicate CSV exports have been removed. Raw windows, labels, subjects,
+   and train/validation/test splits remain available for later experiments.
+
+## Load the training data
+
+Each NPZ contains `windows`, `features`, `labels`, `subjects`, `split`, and
+`feature_names`. Rows correspond across all arrays. Windows have shape
+`(N, 50, 3)` and features have shape `(N, 20)`; names are in the same order for
+both datasets. Subject IDs and labels are metadata, not input features.
 
 ```python
-from model_data import load_transfer
+import numpy as np
 
-experiment = load_transfer("uci_har", "wisdm")
-train = experiment["source_train"]
-val = experiment["source_val"]
-source_test = experiment["source_test"]
-target_all = experiment["target_all"]
-target_adapt = experiment["target_adapt"]
-target_test = experiment["target_test"]
-scaler = experiment["scaler"]
+with np.load("data/processed/uci_har.npz", allow_pickle=False) as data:
+    train = data["split"] == "train"
+    X_train = data["features"][train]
+    y_train = data["labels"][train]
+    subjects_train = data["subjects"][train]
+    windows_train = data["windows"][train]  # For a CNN/LSTM later.
+    feature_names = data["feature_names"]
 ```
 
-The helper fits channel and feature means/standard deviations on source training windows only, and applies those same values to every source and target partition. Reverse the dataset arguments for WISDM → UCI. The saved arrays remain unscaled. When using cross-validation, fit new scalers inside each training fold.
+Use `wisdm.npz` for the other dataset and `val` or `test` for held-out subjects.
+For zero-shot transfer, evaluate on the other dataset without fitting to it.
+For adaptation, use target train/validation subjects and reserve target test
+subjects for evaluation; compare adapted and unadapted models on that same test set.
 
-`target_all` supports the proposal's full-target zero-shot evaluation. For adaptation experiments, sample labelled target windows only from `target_adapt` (target train + validation subjects), and compare adapted and unadapted models on the identical `target_test` subjects. Fit target-domain normalization or alignment on the adaptation pool as well. The target test labels must remain unused for training, tuning, or alignment. Exact adaptation label budgets and repeated sampling seeds belong in the later model experiments; all required labels and subject groups are available here.
+Current preparation produces 8,355 UCI windows and 29,168 WISDM windows:
 
-The same preprocessing supports statistical-feature classifiers and raw-window neural models. No models are trained by these scripts.
+| Dataset | Train | Validation | Test |
+| --- | ---: | ---: | ---: |
+| UCI HAR | 4,683 | 1,262 | 2,410 |
+| WISDM | 17,331 | 6,396 | 5,441 |
 
-## Dataset citations
-
-- Anguita, D., Ghio, A., Oneto, L., Parra, X., and Reyes-Ortiz, J. L. (2013). *A Public Domain Dataset for Human Activity Recognition Using Smartphones*. ESANN. Dataset DOI: [10.24432/C54S4K](https://doi.org/10.24432/C54S4K).
-- Kwapisz, J. R., Weiss, G. M., and Moore, S. A. (2010). *Activity Recognition using Cell Phone Accelerometers*. KDD Sensor Data workshop. [Original paper](https://www.cis.fordham.edu/wisdm/includes/files/sensorKDD-2010.pdf).
-
-Retain the supplied READMEs when redistributing the data, as requested by the publishers.
+Cite Anguita et al. (2013), *A Public Domain Dataset for Human Activity
+Recognition Using Smartphones*, and Kwapisz, Weiss, and Moore (2010), *Activity
+Recognition using Cell Phone Accelerometers*, when reporting results.

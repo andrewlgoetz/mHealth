@@ -1,525 +1,198 @@
-"""Prepare comparable UCI HAR and WISDM windows, features, and subject splits."""
+"""Prepare UCI HAR and WISDM with matching windows, labels, and features."""
 
-import argparse
-import json
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 from scipy.signal import resample_poly
 
 from features import extract_features
 
 ROOT = Path(__file__).resolve().parent
+UCI_DIR = ROOT / "data/raw/uci_har/UCI HAR Dataset"
+WISDM_FILE = ROOT / "data/raw/wisdm/WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt"
+OUTPUT_DIR = ROOT / "data/processed"
+
 CLASSES = ["walking", "upstairs", "downstairs", "sitting", "standing"]
-WISDM_LABELS = {name.title(): index for index, name in enumerate(CLASSES)}
-SAMPLE_RATE = 20  # Both datasets use this sampling rate after preprocessing.
-GRAVITY = 9.80665  # Convert UCI acceleration from g to m/s².
+SAMPLE_RATE = 20
+WINDOW_SAMPLES = 50  # 2.5 seconds at 20 Hz.
+STEP_SAMPLES = 25    # WISDM windows overlap by 50%.
+GRAVITY = 9.80665    # Convert UCI acceleration from g to m/s^2.
 
 
-def find_file(directory, filename):
-    """Find a release file without depending on the archive's folder layout."""
-    matches = list(Path(directory).rglob(filename))
-
-    if len(matches) != 1:
-        raise FileNotFoundError(
-            f"Expected one {filename} under {directory}; "
-            "run download_data.py first."
-        )
-
-    return matches[0]
-
-
-def uci_segments(directory, audit):
-    """Reconstruct continuous recordings from UCI's overlapping windows."""
-    audit["original_windows"] = 0
-    audit["verified_overlaps"] = 0
-    audit["same_label_discontinuities"] = 0
+def load_uci(directory=UCI_DIR):
+    """Use each released UCI window independently; do not join recordings."""
+    windows, labels, subjects = [], [], []
 
     for partition in ("train", "test"):
-        subject_file = find_file(directory, f"subject_{partition}.txt")
-        subjects = np.loadtxt(subject_file, dtype=int)
-        labels = np.loadtxt(subject_file.parent / f"y_{partition}.txt", dtype=int)
-
-        # Stack the three axes into (original windows, 128 samples, 3 axes).
-        axis_signals = []
+        folder = Path(directory) / partition
+        activity = np.loadtxt(folder / f"y_{partition}.txt", dtype=int, ndmin=1)
+        people = np.loadtxt(folder / f"subject_{partition}.txt", dtype=int, ndmin=1)
+        axes = []
         for axis in "xyz":
-            signal_file = (
-                subject_file.parent
-                / "Inertial Signals"
-                / f"total_acc_{axis}_{partition}.txt"
-            )
-            axis_signals.append(np.loadtxt(signal_file))
+            path = folder / "Inertial Signals" / f"total_acc_{axis}_{partition}.txt"
+            axes.append(np.loadtxt(path, ndmin=2))
 
-        signals = np.stack(axis_signals, axis=2)
+        signals = np.stack(axes, axis=2)
+        if signals.shape != (len(activity), 128, 3) or len(people) != len(activity):
+            raise ValueError("UCI signal, label, and subject rows do not match.")
+        if not np.isin(activity, np.arange(1, 7)).all():
+            raise ValueError("UCI contains an unknown activity label.")
 
-        if signals.shape != (len(labels), 128, 3) or len(subjects) != len(labels):
-            raise ValueError("Unexpected UCI HAR signal or label shape.")
+        # Keep the five shared activities. Label 6 is laying.
+        keep = activity <= 5
+        signals = signals[keep, :125] * GRAVITY  # First 2.5 seconds at 50 Hz.
 
-        if not np.isfinite(signals).all() or not np.isin(labels, np.arange(1, 7)).all():
-            raise ValueError("Invalid UCI HAR values or labels.")
+        # The polyphase filter prevents aliasing when reducing 50 Hz to 20 Hz.
+        signals = resample_poly(signals, up=2, down=5, axis=1, padtype="line")
+        windows.append(signals)
+        labels.append(activity[keep] - 1)
+        subjects.append(people[keep])
+        if partition == "test":
+            test_subjects = np.unique(people)
 
-        audit["original_windows"] += len(labels)
-        segment_start = 0
-
-        # The extra iteration at the end saves the final recording segment.
-        for index in range(1, len(signals) + 1):
-            same_subject_and_activity = (
-                index < len(signals)
-                and subjects[index] == subjects[index - 1]
-                and labels[index] == labels[index - 1]
-            )
-
-            # Consecutive 128-sample windows share 64 samples. All shared
-            # x/y/z readings must match before we treat them as one recording.
-            overlap_matches = same_subject_and_activity and np.array_equal(
-                signals[index - 1, 64:],
-                signals[index, :64],
-            )
-
-            if overlap_matches:
-                audit["verified_overlaps"] += 1
-                continue
-
-            if same_subject_and_activity:
-                audit["same_label_discontinuities"] += 1
-
-            label = int(labels[segment_start]) - 1  # UCI labels start at 1.
-
-            if label < len(CLASSES):
-                # Keep the first window in full, then append only the new
-                # 64 samples from each later window to avoid duplicating data.
-                first_window = signals[segment_start]
-                new_samples = signals[segment_start + 1:index, 64:].reshape(-1, 3)
-                signal = np.concatenate((first_window, new_samples))
-
-                yield signal * GRAVITY, {
-                    "subject": int(subjects[segment_start]),
-                    "label": label,
-                    "original_partition": partition,
-                    "source_start_record": segment_start,
-                }
-            else:
-                # Laying is not part of the shared five-activity task.
-                excluded_windows = audit.get("excluded_laying_windows", 0)
-                audit["excluded_laying_windows"] = (
-                    excluded_windows + index - segment_start
-                )
-
-            segment_start = index
+    return (
+        np.concatenate(windows).astype(np.float32),
+        np.concatenate(labels),
+        np.concatenate(subjects),
+        test_subjects,
+    )
 
 
-def wisdm_segments(directory, audit, max_gap_seconds=0.5):
-    """Read WISDM records in file order and separate continuous recordings."""
-    path = find_file(directory, "WISDM_ar_v1.1_raw.txt")
-    counts = Counter()
-    activity_counts = Counter()
-    sampling_intervals = []
-
+def read_wisdm_recordings(path):
+    """Yield (timestamp/x/y/z readings, subject, activity) for each valid run."""
     records = []
-    previous_record = None
-    start_record = 0
-    record_number = 0
+    previous = None
+    valid_activities = {activity.title() for activity in CLASSES} | {"Jogging"}
 
-    with path.open(encoding="utf-8") as stream:
-        for line in stream:
-            # A few lines contain more than one semicolon-delimited record.
+    with Path(path).open(encoding="utf-8") as file:
+        for line in file:
+            # Some lines contain several records, separated by semicolons.
             for record in line.split(";"):
                 if not record.strip():
                     continue
-
-                record_number += 1
-                counts["records_seen"] += 1
                 fields = record.strip().split(",")
-
-                # Some complete records have an extra comma after the z value.
                 if len(fields) == 7 and not fields[-1].strip():
-                    fields.pop()
-                    counts["repaired_trailing_comma_records"] += 1
+                    fields.pop()  # Repair one extra trailing comma.
 
                 try:
                     if len(fields) != 6:
                         raise ValueError("Expected six fields")
-
                     subject = int(fields[0])
                     activity = fields[1].strip()
                     timestamp = int(fields[2])
                     acceleration = [float(value) for value in fields[3:]]
-
                     if (
                         subject < 1
-                        or activity not in {*WISDM_LABELS, "Jogging"}
+                        or timestamp <= 0
+                        or activity not in valid_activities
                         or not np.isfinite(acceleration).all()
                     ):
-                        raise ValueError("Invalid sensor values")
-
-                    if timestamp <= 0:
-                        counts["nonpositive_timestamp_records"] += 1
-                        raise ValueError("Invalid timestamp")
-
+                        raise ValueError("Invalid reading")
                 except ValueError:
-                    # An invalid reading ends the current segment. Do not
-                    # interpolate across a record whose time or values are bad.
-                    counts["invalid_records"] += 1
+                    # Do not join data across a missing or invalid reading.
                     if records:
-                        previous_subject, previous_activity, _ = previous_record
-                        yield (
-                            np.asarray(records),
-                            previous_subject,
-                            previous_activity,
-                            start_record,
-                        )
-
+                        yield np.asarray(records), previous[0], previous[1]
                     records = []
-                    previous_record = None
+                    previous = None
                     continue
 
-                activity_counts[activity] += 1
-                starts_new_segment = previous_record is None
-
-                if previous_record is not None:
-                    previous_subject, previous_activity, previous_timestamp = (
-                        previous_record
+                if previous is not None:
+                    old_subject, old_activity, old_time, old_acceleration = previous
+                    same_activity = subject == old_subject and activity == old_activity
+                    elapsed = (timestamp - old_time) / 1e9
+                    is_duplicate = (
+                        same_activity and elapsed == 0
+                        and acceleration == old_acceleration
                     )
-                    elapsed_seconds = (timestamp - previous_timestamp) / 1e9
-
-                    if subject != previous_subject or activity != previous_activity:
-                        counts["subject_or_activity_changes"] += 1
-                        starts_new_segment = True
-
-                    elif elapsed_seconds == 0 and records[-1][1:] == acceleration:
-                        # Skip exact copies without breaking a valid recording.
-                        counts["removed_exact_duplicate_records"] += 1
-                        continue
-
-                    elif elapsed_seconds <= 0:
-                        # A backwards clock or conflicting duplicate timestamp
-                        # cannot be interpolated as part of the current segment.
-                        counts["timestamp_resets_or_conflicting_duplicates"] += 1
-                        starts_new_segment = True
-
-                    elif elapsed_seconds > max_gap_seconds:
-                        counts["large_time_gaps"] += 1
-                        starts_new_segment = True
-
-                    else:
-                        sampling_intervals.append(elapsed_seconds)
-
-                if starts_new_segment:
-                    if records:
-                        yield (
-                            np.asarray(records),
-                            previous_subject,
-                            previous_activity,
-                            start_record,
-                        )
-
-                    records = []
-                    start_record = record_number
+                    if is_duplicate:
+                        continue  # Exact duplicate; keep the recording intact.
+                    if not same_activity or not 0 < elapsed <= 0.5:
+                        # Start again after a subject/activity change, clock
+                        # reset, conflicting timestamp, or gap over 0.5 seconds.
+                        yield np.asarray(records), old_subject, old_activity
+                        records = []
 
                 records.append([timestamp, *acceleration])
-                previous_record = (subject, activity, timestamp)
+                previous = (subject, activity, timestamp, acceleration)
 
-    # There may be one last segment left when the file ends.
     if records:
-        previous_subject, previous_activity, _ = previous_record
-        yield np.asarray(records), previous_subject, previous_activity, start_record
-
-    audit.update(dict(counts))
-    audit["valid_records_by_activity"] = dict(activity_counts)
-
-    if sampling_intervals:
-        interval_percentiles = np.percentile(sampling_intervals, [5, 50, 95])
-        audit["timestamp_interval_seconds_p5_p50_p95"] = interval_percentiles.tolist()
+        yield np.asarray(records), previous[0], previous[1]
 
 
-def uniform_wisdm_segments(directory, audit, max_gap_seconds):
-    """Interpolate each WISDM recording onto an evenly spaced 20 Hz grid."""
-    segments = wisdm_segments(directory, audit, max_gap_seconds)
+def load_wisdm(path=WISDM_FILE):
+    """Interpolate continuous WISDM runs to 20 Hz and make 2.5-second windows."""
+    windows, labels, subjects = [], [], []
 
-    for records, subject, activity, start_record in segments:
+    for records, subject, activity in read_wisdm_recordings(path):
         if activity == "Jogging":
             continue
+        times = (records[:, 0] - records[0, 0]) / 1e9
+        sample_count = int(np.floor(times[-1] * SAMPLE_RATE + 1e-7)) + 1
+        grid = np.arange(sample_count) / SAMPLE_RATE
+        axes = [np.interp(grid, times, records[:, axis]) for axis in (1, 2, 3)]
+        signal = np.column_stack(axes)
 
-        # Subtract before converting nanoseconds to seconds, preserving precision.
-        timestamps = (records[:, 0] - records[0, 0]) / 1e9
-
-        # End the grid at or before the last real reading; do not extrapolate.
-        # The small tolerance avoids losing a sample to floating-point rounding.
-        sample_count = int(np.floor(timestamps[-1] * SAMPLE_RATE + 1e-7)) + 1
-        time_grid = np.arange(sample_count) / SAMPLE_RATE
-
-        resampled_axes = []
-        for axis in (1, 2, 3):
-            resampled_axis = np.interp(time_grid, timestamps, records[:, axis])
-            resampled_axes.append(resampled_axis)
-
-        signal = np.column_stack(resampled_axes)
-
-        yield signal, {
-            "subject": subject,
-            "label": WISDM_LABELS[activity],
-            "original_partition": "raw",
-            "source_start_record": start_record,
-            "source_start_timestamp_ns": int(records[0, 0]),
-        }
-
-
-def make_windows(segments, window_samples, step_samples):
-    """Make complete windows without crossing recording boundaries."""
-    windows = []
-    metadata = []
-    segment_metadata = []
-
-    for segment_id, (signal, info) in enumerate(segments):
-        starts = range(0, len(signal) - window_samples + 1, step_samples)
-
-        # Keep a record of short segments too, even if they produce no windows.
-        segment_metadata.append({
-            **info,
-            "segment_id": segment_id,
-            "resampled_samples": len(signal),
-            "windows": len(starts),
-        })
-
-        for start in starts:
-            windows.append(signal[start:start + window_samples])
-            metadata.append({
-                "subject": info["subject"],
-                "label": info["label"],
-                "activity": CLASSES[info["label"]],
-                "segment_id": segment_id,
-                "start_seconds": start / SAMPLE_RATE,
-                "original_partition": info["original_partition"],
-            })
+        # Use elapsed time, not raw row counts, because timestamps are irregular.
+        # Each window stays within one subject, activity, and recording run.
+        for start in range(0, len(signal) - WINDOW_SAMPLES + 1, STEP_SAMPLES):
+            windows.append(signal[start:start + WINDOW_SAMPLES])
+            labels.append(CLASSES.index(activity.lower()))
+            subjects.append(subject)
 
     if not windows:
-        raise ValueError(
-            "No complete windows remain. "
-            "Check signal continuity and window length."
-        )
-
+        raise ValueError("WISDM has no complete windows after cleaning.")
     return (
         np.asarray(windows, dtype=np.float32),
-        pd.DataFrame(metadata),
-        pd.DataFrame(segment_metadata),
+        np.asarray(labels, dtype=np.int64),
+        np.asarray(subjects, dtype=np.int64),
     )
 
 
-def assign_splits(metadata, name, seed):
-    """Assign whole subjects to train, validation, or test using a fixed seed."""
-    rng = np.random.default_rng(seed)
-    subjects = np.sort(metadata.subject.unique())
-
-    if name == "uci_har":
-        # Keep the official test subjects; reserve part of train for validation.
-        test_rows = metadata.original_partition == "test"
-        test_subjects = metadata.loc[test_rows, "subject"].unique()
-        remaining_subjects = np.setdiff1d(subjects, test_subjects)
-
-        validation_count = max(1, round(0.2 * len(remaining_subjects)))
-        validation_subjects = rng.permutation(remaining_subjects)[:validation_count]
-
+def make_splits(subjects, test_subjects=None):
+    """Keep each person's windows together to prevent train/test leakage."""
+    rng = np.random.default_rng(42)
+    people = np.unique(subjects)
+    if test_subjects is None:
+        people = rng.permutation(people)
+        count = max(1, round(0.2 * len(people)))
+        test_subjects = people[:count]
+        validation_subjects = people[count:2 * count]
     else:
-        # WISDM has no official split. Reserve about 20% of subjects for each
-        # of validation and test, leaving the rest for training.
-        shuffled_subjects = rng.permutation(subjects)
-        held_out_count = max(1, round(0.2 * len(subjects)))
+        remaining = np.setdiff1d(people, test_subjects)
+        count = max(1, round(0.2 * len(remaining)))
+        validation_subjects = rng.permutation(remaining)[:count]
 
-        test_subjects = shuffled_subjects[:held_out_count]
-        validation_subjects = shuffled_subjects[held_out_count:2 * held_out_count]
-
-    is_test = metadata.subject.isin(test_subjects)
-    is_validation = metadata.subject.isin(validation_subjects)
-    training_or_validation = np.where(is_validation, "val", "train")
-    metadata["split"] = np.where(is_test, "test", training_or_validation)
-
-    return metadata
+    split = np.full(len(subjects), "train", dtype="U5")
+    split[np.isin(subjects, validation_subjects)] = "val"
+    split[np.isin(subjects, test_subjects)] = "test"
+    return split
 
 
-def validate_dataset(windows, features, metadata, window_samples):
-    """Check row alignment, finite inputs, subject isolation, and class coverage."""
-    expected_shape = (len(metadata), window_samples, 3)
-
-    if windows.shape != expected_shape or len(features) != len(metadata):
-        raise ValueError("Window, feature, and metadata rows do not align.")
-
-    if not np.isfinite(windows).all() or not np.isfinite(features).all():
-        raise ValueError("Non-finite model inputs remain.")
-
-    # Keeping each subject in one split also keeps their overlapping windows
-    # together, preventing shared samples from leaking between splits.
-    if metadata.groupby("subject")["split"].nunique().max() != 1:
-        raise ValueError("A subject appears in multiple splits.")
-
-    if metadata.groupby("segment_id")["split"].nunique().max() != 1:
-        raise ValueError("Overlapping windows appear in multiple splits.")
-
-    expected_labels = set(range(len(CLASSES)))
-    for split in ("train", "val", "test"):
-        actual_labels = set(metadata.loc[metadata.split == split, "label"])
-        if actual_labels != expected_labels:
-            raise ValueError(
-                f"{split} is missing an activity. Review the subject split."
-            )
-
-
-def prepare_dataset(
-    name,
-    data_dir,
-    report_dir,
-    window_seconds,
-    overlap,
-    seed,
-    max_gap_seconds,
-):
-    """Prepare and save one dataset, then report the cleaning and split counts."""
-    print(f"Preparing {name}", flush=True)
-    directory = data_dir / "raw" / name
-    audit = {}
-    window_samples = round(window_seconds * SAMPLE_RATE)
-    step_samples = round(window_samples * (1 - overlap))
-
-    # Read each continuous recording and bring it to the shared sampling rate.
-    if name == "uci_har":
-        def resampled_segments():
-            for signal, info in uci_segments(directory, audit):
-                # Downsample 50 Hz to 20 Hz (2/5). The FIR filter removes
-                # frequencies that the lower sampling rate cannot represent.
-                resampled = resample_poly(
-                    signal,
-                    up=2,
-                    down=5,
-                    axis=0,
-                    padtype="line",
-                )
-
-                # Discard any final sample beyond the original recording time.
-                valid_length = int(np.floor((len(signal) - 1) * SAMPLE_RATE / 50)) + 1
-                yield resampled[:valid_length], info
-
-        segments = resampled_segments()
-    else:
-        segments = uniform_wisdm_segments(directory, audit, max_gap_seconds)
-
-    # Both datasets now use the same window shape, labels, and feature function.
-    windows, metadata, segment_metadata = make_windows(
-        segments,
-        window_samples,
-        step_samples,
-    )
-    metadata = assign_splits(metadata, name, seed)
-    features, feature_names = extract_features(windows, SAMPLE_RATE)
-    validate_dataset(windows, features, metadata, window_samples)
-
-    # Save unscaled model inputs. Scaling is fitted later on source train only.
-    output = data_dir / "processed" / name
-    output.mkdir(parents=True, exist_ok=True)
+def save_dataset(name, windows, labels, subjects, test_subjects=None):
+    # Save one file per dataset. Metadata stays separate from model features.
+    features, names = extract_features(windows, SAMPLE_RATE)
+    split = make_splits(subjects, test_subjects)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
-        output / "dataset.npz",
-        X=windows,
+        OUTPUT_DIR / f"{name}.npz",
+        windows=windows,
         features=features,
-        y=metadata.label.to_numpy(dtype=np.int64),
-        subjects=metadata.subject.to_numpy(dtype=np.int64),
-        feature_names=np.asarray(feature_names),
-        split=metadata.split.to_numpy(dtype="U5"),
-        segment_ids=metadata.segment_id.to_numpy(dtype=np.int64),
-        start_seconds=metadata.start_seconds.to_numpy(dtype=float),
+        labels=labels,
+        subjects=subjects,
+        split=split,
+        feature_names=np.asarray(names),
     )
-
-    # CSV rows stay in the same order as the arrays in dataset.npz.
-    metadata.to_csv(output / "metadata.csv", index=False)
-    feature_table = pd.DataFrame(features, columns=feature_names)
-    feature_table.to_csv(output / "features.csv", index=False)
-    segment_metadata.to_csv(output / "segments.csv", index=False)
-
-    # Record the actual configuration and counts for the shared experiment log.
-    summary = {
-        "dataset": name,
-        "classes": dict(enumerate(CLASSES)),
-        "sample_rate_hz": SAMPLE_RATE,
-        "acceleration_units": "m/s^2 (gravity retained)",
-        "window_seconds": window_samples / SAMPLE_RATE,
-        "step_seconds": step_samples / SAMPLE_RATE,
-        "requested_overlap": overlap,
-        "seed": seed,
-        "max_wisdm_gap_seconds": max_gap_seconds,
-        "windows": len(windows),
-        "subjects": int(metadata.subject.nunique()),
-        "features": len(feature_names),
-        "segments": len(segment_metadata),
-        "segments_too_short": int((segment_metadata.windows == 0).sum()),
-        "class_windows": {
-            activity: int((metadata.activity == activity).sum())
-            for activity in CLASSES
-        },
-        "splits": {},
-        "cleaning": audit,
-    }
-
-    for split in ("train", "val", "test"):
-        rows = metadata[metadata.split == split]
-        summary["splits"][split] = {
-            "windows": len(rows),
-            "subjects": sorted(int(subject) for subject in rows.subject.unique()),
-            "class_windows": {
-                activity: int((rows.activity == activity).sum())
-                for activity in CLASSES
-            },
-        }
-
-    report_dir.mkdir(parents=True, exist_ok=True)
-    summary_file = report_dir / f"{name}_summary.json"
-    summary_file.write_text(
-        json.dumps(summary, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-    print(
-        f"{name}: {len(windows):,} windows, "
-        f"{metadata.subject.nunique()} subjects, {len(feature_names)} features",
-        flush=True,
-    )
-    return summary
-
-
-def main():
-    """Read command-line settings and prepare both datasets."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
-    parser.add_argument("--window-seconds", type=float, default=5.0)
-    parser.add_argument("--overlap", type=float, default=0.5)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-gap-seconds", type=float, default=0.5)
-    args = parser.parse_args()
-
-    # Reject settings that cannot produce a valid window or sampling interval.
-    if not np.isfinite(args.window_seconds) or args.window_seconds * SAMPLE_RATE < 2:
-        parser.error("--window-seconds must give at least two samples at 20 Hz")
-
-    if not np.isfinite(args.overlap) or not 0 <= args.overlap < 1:
-        parser.error("--overlap must be in [0, 1)")
-
-    window_samples = round(args.window_seconds * SAMPLE_RATE)
-    step_samples = round(window_samples * (1 - args.overlap))
-    if step_samples < 1:
-        parser.error("--overlap gives a step smaller than one sample")
-
-    if not np.isfinite(args.max_gap_seconds) or args.max_gap_seconds <= 0:
-        parser.error("--max-gap-seconds must be positive")
-
-    for name in ("uci_har", "wisdm"):
-        prepare_dataset(
-            name,
-            args.data_dir,
-            ROOT / "reports",
-            args.window_seconds,
-            args.overlap,
-            args.seed,
-            args.max_gap_seconds,
-        )
+    print(f"{name}: {len(labels):,} examples, {len(names)} features")
+    for part in ("train", "val", "test"):
+        print(f"  {part}: {(split == part).sum():,} examples")
 
 
 if __name__ == "__main__":
-    main()
+    if not UCI_DIR.exists() or not WISDM_FILE.exists():
+        raise SystemExit("Raw data are missing. See the download steps in README.md.")
+
+    windows, labels, subjects, test_subjects = load_uci()
+    save_dataset("uci_har", windows, labels, subjects, test_subjects)
+
+    windows, labels, subjects = load_wisdm()
+    save_dataset("wisdm", windows, labels, subjects)
