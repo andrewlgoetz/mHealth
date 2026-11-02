@@ -1,0 +1,103 @@
+{
+  "dataset": "uci_har",
+  "classes": {
+    "0": "walking",
+    "1": "upstairs",
+    "2": "downstairs",
+    "3": "sitting",
+    "4": "standing"
+  },
+  "sample_rate_hz": 20,
+  "acceleration_units": "m/s^2 (gravity retained)",
+  "window_seconds": 5.0,
+  "step_seconds": 2.5,
+  "requested_overlap": 0.5,
+  "seed": 42,
+  "max_wisdm_gap_seconds": 0.5,
+  "windows": 3609,
+  "subjects": 30,
+  "features": 76,
+  "segments": 737,
+  "segments_too_short": 8,
+  "class_windows": {
+    "walking": 766,
+    "upstairs": 626,
+    "downstairs": 560,
+    "sitting": 792,
+    "standing": 865
+  },
+  "splits": {
+    "train": {
+      "windows": 2018,
+      "subjects": [
+        1,
+        3,
+        5,
+        6,
+        7,
+        8,
+        11,
+        14,
+        15,
+        16,
+        19,
+        21,
+        22,
+        23,
+        27,
+        28,
+        29
+      ],
+      "class_windows": {
+        "walking": 426,
+        "upstairs": 342,
+        "downstairs": 302,
+        "sitting": 453,
+        "standing": 495
+      }
+    },
+    "val": {
+      "windows": 557,
+      "subjects": [
+        17,
+        25,
+        26,
+        30
+      ],
+      "class_windows": {
+        "walking": 119,
+        "upstairs": 96,
+        "downstairs": 90,
+        "sitting": 121,
+        "standing": 131
+      }
+    },
+    "test": {
+      "windows": 1034,
+      "subjects": [
+        2,
+        4,
+        9,
+        10,
+        12,
+        13,
+        18,
+        20,
+        24
+      ],
+      "class_windows": {
+        "walking": 221,
+        "upstairs": 188,
+        "downstairs": 168,
+        "sitting": 218,
+        "standing": 239
+      }
+    }
+  },
+  "cleaning": {
+    "original_windows": 10299,
+    "verified_overlaps": 9442,
+    "same_label_discontinuities": 457,
+    "excluded_laying_windows": 1944
+  }
+}

@@ -1,0 +1,20 @@
+Proposal Improvements: 
+
+(old) Intro, paragraph 2:  
+
+Prior work in mobile sensing has shown that models trained in controlled, lab-like settings often rely on spurious cues (for example device orientation or individual gait idiosyncrasies) that do not transfer to new users or field conditions. Most HAR papers, however, report results on a single benchmark with a fixed split, and cross-dataset evaluation is comparatively less common 
+
+(updated) intro, paragraph 2: 
+
+Evaluating HAR models within a single dataset may overestimate their ability to generalize, since training and testing share similar sensor configurations and collection conditions. In mobile-health applications, errors under different conditions could distort estimates of daily activity or sedentary behaviour. Cross-dataset evaluation provides a useful test of whether performance transfers beyond the original setting. By evaluating transfer between UCI HAR and WISDM, we aim to identify which activities are most affected and whether lightweight adaptation can recover performance with limited additional labelled data. 
+
+ 
+
+ 
+(old) RQ2:  
+
+Which activities are most affected by domain shift, and which sources of shift (sensor placement, sampling rate, sensor set, or population) plausibly explain the errors? 
+
+(Updated) RQ2:  
+
+Which shared activities experience the largest performance drops when transferring (domains) between UCI HAR and WISDM? 

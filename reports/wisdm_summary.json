@@ -1,0 +1,126 @@
+{
+  "dataset": "wisdm",
+  "classes": {
+    "0": "walking",
+    "1": "upstairs",
+    "2": "downstairs",
+    "3": "sitting",
+    "4": "standing"
+  },
+  "sample_rate_hz": 20,
+  "acceleration_units": "m/s^2 (gravity retained)",
+  "window_seconds": 5.0,
+  "step_seconds": 2.5,
+  "requested_overlap": 0.5,
+  "seed": 42,
+  "max_wisdm_gap_seconds": 0.5,
+  "windows": 14051,
+  "subjects": 36,
+  "features": 76,
+  "segments": 1216,
+  "segments_too_short": 588,
+  "class_windows": {
+    "walking": 8095,
+    "upstairs": 2173,
+    "downstairs": 1754,
+    "sitting": 1111,
+    "standing": 918
+  },
+  "splits": {
+    "train": {
+      "windows": 8368,
+      "subjects": [
+        1,
+        2,
+        3,
+        4,
+        7,
+        9,
+        10,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        20,
+        22,
+        25,
+        29,
+        30,
+        31,
+        32,
+        35
+      ],
+      "class_windows": {
+        "walking": 4893,
+        "upstairs": 1246,
+        "downstairs": 940,
+        "sitting": 728,
+        "standing": 561
+      }
+    },
+    "val": {
+      "windows": 3088,
+      "subjects": [
+        8,
+        11,
+        21,
+        23,
+        26,
+        33,
+        34
+      ],
+      "class_windows": {
+        "walking": 1724,
+        "upstairs": 558,
+        "downstairs": 459,
+        "sitting": 174,
+        "standing": 173
+      }
+    },
+    "test": {
+      "windows": 2595,
+      "subjects": [
+        5,
+        6,
+        19,
+        24,
+        27,
+        28,
+        36
+      ],
+      "class_windows": {
+        "walking": 1478,
+        "upstairs": 369,
+        "downstairs": 355,
+        "sitting": 209,
+        "standing": 184
+      }
+    }
+  },
+  "cleaning": {
+    "records_seen": 1098209,
+    "large_time_gaps": 63,
+    "subject_or_activity_changes": 380,
+    "removed_exact_duplicate_records": 41867,
+    "nonpositive_timestamp_records": 12845,
+    "invalid_records": 12846,
+    "timestamp_resets_or_conflicting_duplicates": 364,
+    "repaired_trailing_comma_records": 11733,
+    "valid_records_by_activity": {
+      "Jogging": 330331,
+      "Walking": 423907,
+      "Upstairs": 122598,
+      "Downstairs": 100194,
+      "Sitting": 59939,
+      "Standing": 48394
+    },
+    "timestamp_interval_seconds_p5_p50_p95": [
+      0.039917,
+      0.049988,
+      0.080078
+    ]
+  }
+}
